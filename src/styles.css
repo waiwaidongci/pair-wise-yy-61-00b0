@@ -156,6 +156,33 @@ button, input, textarea, select { font: inherit; }
 .audit-row p { margin: 5px 0; font-size: 10px; color: #596c78; }
 .audit-row small { font-size: 9px; color: var(--muted); }
 
+/* 离线草稿合并 */
+.draft-tag { margin-left: 6px; vertical-align: middle; }
+.field-label { display: inline-flex; align-items: center; gap: 6px; }
+.draft-banner { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.draft-banner > .fui-MessageBarBody { flex: 1 1 320px; }
+.banner-actions { display: flex; gap: 6px; flex: none; align-self: center; }
+.invalidation-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.invalidation-list li { display: grid; gap: 2px; padding: 7px 10px; border-left: 3px solid #d08a1e; background: #fff8ec; border-radius: 3px; }
+.invalidation-list li strong { font-size: 11px; color: #8a5a14; }
+.invalidation-list li span { font-size: 10px; color: var(--muted); }
+.invalidation-list li small { font-size: 10px; color: #5a6b78; }
+.draft-fields { display: block; margin-top: 8px; font-size: 11px; color: var(--muted); }
+.auto-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.conflict-list { display: grid; gap: 8px; margin-top: 10px; }
+.conflict-row { border: 1px solid #e3d9c6; background: #fffdf7; border-radius: 4px; padding: 9px 11px; display: grid; gap: 6px; }
+.conflict-row > strong { font-size: 11px; }
+.conflict-values { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.conflict-values button { border: 1px solid #d3dde3; background: white; border-radius: 4px; padding: 6px 8px; text-align: left; cursor: pointer; display: grid; gap: 2px; font: inherit; }
+.conflict-values button span { font-size: 10px; color: var(--muted); }
+.conflict-values button code { font-size: 11px; color: #243b4a; font-family: inherit; word-break: break-all; }
+.conflict-values button.active { border-color: #1f628d; background: #eaf3f9; }
+.conflict-values button:disabled { opacity: .7; cursor: default; }
+.conflict-row small { font-size: 10px; color: var(--muted); }
+.reconfirm-message { margin-bottom: 10px; }
+.reconfirm-note { font-size: 11px; color: var(--muted); margin: 10px 0 0; }
+.merge-tag { margin-left: 6px; vertical-align: middle; }
+
 @media (max-width: 1100px) {
   .overview-grid, .execution-grid, .release-grid, .audit-grid { grid-template-columns: 1fr; }
   .overview-side, .execution-side, .release-side { grid-template-columns: 1fr 1fr; }

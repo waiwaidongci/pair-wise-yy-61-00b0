@@ -44,13 +44,21 @@ import {
   WarningRegular
 } from '@fluentui/react-icons';
 import { useGetWorkPackageQuery, useSubmitCardMutation } from './api';
-import { authorizeOverride, refreshVersion, releasePackage, selectCard, setConflict, signStage, toggleOffline, updateCard, type RootState } from './store';
+import { discardDraft, editCardField, mergeDrafts, reconfirmDraft, refreshVersion, resolveConflict, selectCard, setConflict, signStage, toggleOffline, updateCard, authorizeOverride, releasePackage, type AppDispatch, type OfflineCard, type RootState } from './store';
+import { FIELD_LABELS, invalidationLabel, type FieldKey, type FieldSource } from './merge';
 
 type NavItem = { path: string; label: string; icon: ReactNode };
 
+function fmtTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
 function Shell({ children }: { children: ReactNode }) {
   const state = useSelector((root: RootState) => root.maintenance);
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
+  const draftCount = state.cards.filter((card) => card.draft).length;
   const nav: NavItem[] = [
     { path: '/', label: '工作包总览', icon: <ClipboardTaskListLtrRegular /> },
     { path: '/execution', label: '工卡执行', icon: <BookOpenRegular /> },
@@ -66,8 +74,13 @@ function Shell({ children }: { children: ReactNode }) {
         </div>
         <div className="aircraft-chip"><span>B-7891</span><strong>B737-800</strong><Badge appearance="tint" color="brand">48A 定检</Badge></div>
         <div className="header-spacer" />
+        {!state.offline && draftCount > 0 && (
+          <Button appearance="primary" size="small" icon={<CloudArrowUpRegular />} onClick={() => dispatch(mergeDrafts())}>
+            合并 {draftCount} 项本地草稿
+          </Button>
+        )}
         <button className={`sync-status ${state.offline ? 'offline' : ''}`} onClick={() => dispatch(toggleOffline())}>
-          {state.offline ? <CloudOffRegular /> : <CloudArrowUpRegular />}<span>{state.offline ? '离线暂存' : `已同步 R${state.syncVersion}`}</span>
+          {state.offline ? <CloudOffRegular /> : <CloudArrowUpRegular />}<span>{state.offline ? `离线暂存 · ${draftCount} 项草稿` : `已同步 R${state.syncVersion}`}</span>
         </button>
         <div className="user-chip"><span>执行人员</span><strong>宋杰 · 机械</strong></div>
       </header>
@@ -115,7 +128,7 @@ function Overview() {
           {state.cards.map((card, index) => (
             <button key={card.id} className={`task-row ${state.activeCardId === card.id ? 'active' : ''}`} onClick={() => { dispatch(selectCard(card.id)); navigate('/execution'); }}>
               <span className={`task-index ${card.status === '已完成' ? 'done' : card.status === '待授权' ? 'blocked' : ''}`}>{card.status === '已完成' ? <CheckmarkCircleRegular /> : index + 1}</span>
-              <span className="task-main"><strong>{card.id} · {card.title}</strong><small>{card.zone} · 依赖 {card.dependencies.length ? card.dependencies.join('、') : '无'} · 计划 {card.estimated}h</small></span>
+              <span className="task-main"><strong>{card.id} · {card.title}{card.draft && <Tag appearance="filled" color="warning" size="small" className="draft-tag">草稿</Tag>}</strong><small>{card.zone} · 依赖 {card.dependencies.length ? card.dependencies.join('、') : '无'} · 计划 {card.estimated}h</small></span>
               <Tag appearance="outline" size="small">{card.stage}</Tag>
               <Badge appearance="tint" color={card.status === '已完成' ? 'success' : card.status === '待授权' ? 'danger' : card.status === '执行中' ? 'brand' : 'informative'}>{card.status}</Badge>
             </button>
@@ -130,20 +143,150 @@ function Overview() {
   );
 }
 
+function DraftBanner({ card }: { card: OfflineCard }) {
+  const dispatch = useDispatch<AppDispatch>();
+  const offline = useSelector((root: RootState) => root.maintenance.offline);
+  const [reconfirmOpen, setReconfirmOpen] = useState(false);
+  const draft = card.draft;
+  if (!draft) return null;
+
+  const merge = () => dispatch(mergeDrafts());
+  const discard = () => dispatch(discardDraft(card.id));
+  const localFields = (Object.keys(draft.values) as FieldKey[]).filter((field) => draft.values[field] !== undefined);
+  const unresolvedConflicts = draft.conflicts.filter((conflict) => !conflict.resolution);
+
+  const reconfirmDialog = (
+    <Dialog open={reconfirmOpen} onOpenChange={(_, data) => setReconfirmOpen(data.open)}>
+      <DialogSurface>
+        <DialogBody>
+          <DialogTitle>离线结论重新确认</DialogTitle>
+          <DialogContent>
+            <MessageBar intent="warning" className="reconfirm-message">
+              <MessageBarBody>该工卡离线期间发生过以下权威操作，本地草稿结论已失效：</MessageBarBody>
+            </MessageBar>
+            <ul className="invalidation-list">
+              {draft.invalidations.map((item) => (
+                <li key={item.id}><strong>{invalidationLabel(item.type)} · {item.ref}</strong><span>{item.by} · {fmtTime(item.at)}</span><small>{item.detail}</small></li>
+              ))}
+            </ul>
+            <p className="reconfirm-note">
+              「以服务器为准」将作废本地结论并采用正式记录；「保留本地草稿」将把本地结论作为冲突项保留，裁决前不得写入正式记录。
+            </p>
+          </DialogContent>
+          <DialogActions>
+            <Button appearance="secondary" onClick={() => { dispatch(reconfirmDraft({ cardId: card.id, mode: 'keep' })); setReconfirmOpen(false); }}>保留本地草稿</Button>
+            <Button appearance="primary" onClick={() => { dispatch(reconfirmDraft({ cardId: card.id, mode: 'accept' })); setReconfirmOpen(false); }}>以服务器为准</Button>
+          </DialogActions>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
+  );
+
+  if (draft.status === 'stale') {
+    return (
+      <MessageBar intent="warning" className="top-message draft-banner">
+        <MessageBarBody>
+          <strong>离线期间结论已失效，需重新确认：</strong>
+          该工卡离线期间被授权、阶段签署或放行，本地草稿结论不能直接写入正式记录。
+          <ul className="invalidation-list">
+            {draft.invalidations.map((item) => (
+              <li key={item.id}><strong>{invalidationLabel(item.type)} · {item.ref}</strong><span>{item.by} · {fmtTime(item.at)}</span><small>{item.detail}</small></li>
+            ))}
+          </ul>
+          <span className="draft-fields">受影响字段：{localFields.map((field) => FIELD_LABELS[field]).join('、')}</span>
+        </MessageBarBody>
+        <div className="banner-actions">
+          <Button appearance="primary" size="small" onClick={() => setReconfirmOpen(true)}>重新确认</Button>
+          <Button appearance="secondary" size="small" onClick={discard}>丢弃草稿</Button>
+        </div>
+        {reconfirmDialog}
+      </MessageBar>
+    );
+  }
+
+  if (draft.status === 'conflict' || draft.status === 'failed') {
+    const failed = draft.status === 'failed';
+    return (
+      <MessageBar intent={failed ? 'error' : 'warning'} className="top-message draft-banner">
+        <MessageBarBody>
+          <strong>{failed ? '合并失败，本地草稿已保留：' : '字段冲突，不能按后到覆盖：'}</strong>
+          {failed ? draft.error : `本地草稿与服务器正式记录在 ${draft.conflicts.length} 个字段上均有修改，请逐项裁决后再合并。`}
+          <div className="conflict-list">
+            {draft.conflicts.map((conflict) => (
+              <div className="conflict-row" key={conflict.id}>
+                <strong>{conflict.label}</strong>
+                <div className="conflict-values">
+                  <button
+                    type="button"
+                    className={conflict.resolution === 'local' ? 'active' : ''}
+                    disabled={failed}
+                    onClick={() => dispatch(resolveConflict({ cardId: card.id, conflictId: conflict.id, resolution: 'local' }))}
+                  ><span>保留本地</span><code>{conflict.localValue || '（空）'}</code></button>
+                  <button
+                    type="button"
+                    className={conflict.resolution === 'server' ? 'active' : ''}
+                    disabled={failed}
+                    onClick={() => dispatch(resolveConflict({ cardId: card.id, conflictId: conflict.id, resolution: 'server' }))}
+                  ><span>采用服务器</span><code>{conflict.serverValue || '（空）'}</code></button>
+                </div>
+                <small>{conflict.reason}</small>
+              </div>
+            ))}
+          </div>
+        </MessageBarBody>
+        <div className="banner-actions">
+          <Button appearance="primary" size="small" disabled={!failed && (offline || unresolvedConflicts.length > 0)} onClick={merge}>
+            {failed ? '重试合并' : '合并到服务器'}
+          </Button>
+          <Button appearance="secondary" size="small" onClick={discard}>丢弃草稿</Button>
+        </div>
+        {reconfirmDialog}
+      </MessageBar>
+    );
+  }
+
+  // draft：待合并或已规划可自动合并。
+  return (
+    <MessageBar intent="info" className="top-message draft-banner">
+      <MessageBarBody>
+        <strong>本地草稿待合并：</strong>
+        基于工卡版本 R{draft.baseRev} 离线保存{draft.serverRev ? `，服务器正式记录当前 R${draft.serverRev}` : ''}，恢复网络后按字段来源合并。
+        {draft.autoFields && Object.keys(draft.autoFields).length > 0 && (
+          <span className="auto-chips">
+            {Object.entries(draft.autoFields).map(([field, source]) => (
+              <Tag key={field} size="small" appearance="outline" color={source === 'local' ? 'warning' : 'brand'}>
+                {FIELD_LABELS[field as FieldKey]}：{source === 'local' ? '采用本地值' : '采用服务器值'}
+              </Tag>
+            ))}
+          </span>
+        )}
+      </MessageBarBody>
+      <div className="banner-actions">
+        <Button appearance="primary" size="small" disabled={offline} onClick={merge}>{offline ? '离线中' : '合并到服务器'}</Button>
+        <Button appearance="secondary" size="small" onClick={discard}>丢弃草稿</Button>
+      </div>
+    </MessageBar>
+  );
+}
+
 function Execution() {
   const state = useSelector((root: RootState) => root.maintenance);
-  const dispatch = useDispatch();
+  const dispatch = useDispatch<AppDispatch>();
   const { data } = useGetWorkPackageQuery();
   const card = state.cards.find((item) => item.id === state.activeCardId) ?? state.cards[0];
   const [measurement, setMeasurement] = useState(card.measurement);
   const [finding, setFinding] = useState(card.finding);
+  const [evidenceNote, setEvidenceNote] = useState(card.evidenceNote);
   const [consumable, setConsumable] = useState('');
   const [witness, setWitness] = useState(false);
   const [overrideOpen, setOverrideOpen] = useState(false);
   const [submitCard] = useSubmitCardMutation();
-  useEffect(() => { setMeasurement(card.measurement); setFinding(card.finding); }, [card.id, card.measurement, card.finding]);
+  useEffect(() => { setMeasurement(card.measurement); setFinding(card.finding); setEvidenceNote(card.evidenceNote); }, [card.id, card.measurement, card.finding, card.evidenceNote]);
   const toleranceIssue = card.id === 'CARD-03' && Number.parseFloat(measurement) < 2850;
   const dependenciesMet = card.dependencies.every((dependency) => state.cards.find((item) => item.id === dependency)?.status === '已完成');
+  const commitField = (field: FieldKey, value: string) => {
+    dispatch(editCardField({ cardId: card.id, field, value }));
+  };
   const complete = async () => {
     if (!dependenciesMet) {
       dispatch(setConflict(`前置工卡 ${card.dependencies.join('、')} 尚未完成。`));
@@ -155,6 +298,23 @@ function Execution() {
     }
     if (!witness) {
       dispatch(setConflict('关键步骤必须完成见证确认。'));
+      return;
+    }
+    // 表单值先落入本地草稿（断网时即离线暂存，联网时随草稿合并）。
+    commitField('measurement', measurement);
+    commitField('finding', finding);
+    commitField('evidenceNote', evidenceNote);
+    if (state.offline) {
+      dispatch(setConflict(''));
+      return;
+    }
+    if (card.draft) {
+      try {
+        await dispatch(mergeDrafts()).unwrap();
+        dispatch(setConflict(''));
+      } catch (error) {
+        dispatch(setConflict((error as Error).message ?? '合并失败，请重试。'));
+      }
       return;
     }
     if (state.syncVersion !== state.serverVersion) {
@@ -174,6 +334,7 @@ function Execution() {
     <div className="page">
       <PageHeading eyebrow={`${card.id} / ${card.stage}`} title={card.title} description={`${card.zone} · 工卡版本 ${data?.revision ?? 'R7'} · 预计 ${card.estimated} 小时`} actions={<><Button appearance="secondary" icon={<ArrowSyncRegular />} onClick={() => dispatch(toggleOffline())}>{state.offline ? '恢复在线' : '离线暂存'}</Button><Button appearance="primary" icon={<CheckmarkCircleRegular />} onClick={complete}>完成并提交</Button></>} />
       {state.conflictMessage && <MessageBar intent="error" className="top-message"><MessageBarBody><strong>提交被阻断：</strong>{state.conflictMessage}</MessageBarBody><Button appearance="secondary" size="small" onClick={() => dispatch(refreshVersion())}>刷新版本</Button></MessageBar>}
+      <DraftBanner card={card} />
       <div className="execution-grid">
         <section className="panel card-editor">
           <div className="panel-head"><div><h2>工卡执行内容</h2><span>执行人员必须记录关键数据及证据</span></div><Badge appearance="tint" color={card.status === '待授权' ? 'danger' : 'brand'}>{card.status}</Badge></div>
@@ -183,9 +344,10 @@ function Execution() {
           </div>
           <Divider />
           <div className="form-grid">
-            <Field label="测量值" hint={card.tolerance} validationState={toleranceIssue ? 'error' : 'none'} validationMessage={toleranceIssue ? '低于最低接受值 2850 psi' : undefined}><Input value={measurement} onChange={(_, data) => setMeasurement(data.value)} contentBefore={<GaugeRegular />} /></Field>
+            <Field label={<span className="field-label">测量值 {card.draft?.values.measurement !== undefined && <Tag size="small" color="warning">本地草稿</Tag>}</span>} hint={card.tolerance} validationState={toleranceIssue ? 'error' : 'none'} validationMessage={toleranceIssue ? '低于最低接受值 2850 psi' : undefined}><Input value={measurement} onChange={(_, data) => { setMeasurement(data.value); commitField('measurement', data.value); }} contentBefore={<GaugeRegular />} /></Field>
             <Field label="耗材 / 航材"><Input value={consumable} onChange={(_, data) => setConsumable(data.value)} placeholder="输入件号或耗材批次" /></Field>
-            <Field label="发现与处置" className="wide-field"><Textarea value={finding} onChange={(_, data) => setFinding(data.value)} resize="vertical" placeholder="正常或填写缺陷、处置措施" /></Field>
+            <Field label={<span className="field-label">发现与处置 {card.draft?.values.finding !== undefined && <Tag size="small" color="warning">本地草稿</Tag>}</span>} className="wide-field"><Textarea value={finding} onChange={(_, data) => { setFinding(data.value); commitField('finding', data.value); }} resize="vertical" placeholder="正常或填写缺陷、处置措施" /></Field>
+            <Field label={<span className="field-label">证据说明 {card.draft?.values.evidenceNote !== undefined && <Tag size="small" color="warning">本地草稿</Tag>}</span>} className="wide-field"><Textarea value={evidenceNote} onChange={(_, data) => { setEvidenceNote(data.value); commitField('evidenceNote', data.value); }} resize="vertical" placeholder="填写证据编号、照片或记录说明，随工卡草稿合并" /></Field>
             <Field label="证据附件" className="wide-field"><div className="upload-zone"><CloudArrowUpRegular /><strong>拖入照片、测试记录或报告</strong><span>已关联 3 个证据 · 支持 JPG / PDF / TXT</span></div></Field>
           </div>
           <label className="witness-check"><Checkbox checked={witness} onChange={(_, data) => setWitness(Boolean(data.checked))} /><span><strong>见证人已现场确认</strong><small>要求：{card.witness}</small></span></label>
@@ -251,7 +413,7 @@ function Audit() {
       <PageHeading eyebrow="AUDIT / VERSION CONTROL" title="审计与版本差异" description="对比工卡版本、查看操作历史并导出闭环证据。" actions={<Button appearance="primary" icon={<ArrowDownloadRegular />} onClick={downloadAudit}>导出审计记录</Button>} />
       <div className="audit-grid">
         <section className="panel diff-panel"><div className="panel-head"><div><h2>工卡版本差异</h2><span>R6 → R7 · 3 处变更</span></div><select value={selected} onChange={(event) => setSelected(event.target.value)}><option>R7</option><option>R6</option><option>R5</option></select></div><div className="diff-table"><div className="diff-head"><span>工卡</span><span>字段</span><span>原值</span><span>新值 / 原因</span></div>{diffs.map((diff) => <div className="diff-row" key={`${diff.card}-${diff.field}`}><strong>{diff.card}</strong><span>{diff.field}</span><del>{diff.from}</del><div><ins>{diff.to}</ins><small>{diff.reason}</small></div></div>)}</div></section>
-        <section className="panel audit-panel"><div className="panel-head"><div><h2>完整审计时间线</h2><span>{state.audit.length} 条记录</span></div><HistoryRegular /></div>{state.audit.map((item, index) => <div className="audit-row" key={`${item.time}-${index}`}><span className="timeline-dot" /><div><strong>{item.action}</strong><p>{item.detail}</p><small>{item.time} · {item.actor}</small></div></div>)}</section>
+        <section className="panel audit-panel"><div className="panel-head"><div><h2>完整审计时间线</h2><span>{state.audit.length} 条记录 · 合并记录按 mergeId 幂等</span></div><HistoryRegular /></div>{state.audit.map((item, index) => <div className="audit-row" key={`${item.time}-${index}`}><span className="timeline-dot" /><div><strong>{item.action}{item.mergeId && <Tag size="small" appearance="outline" color="brand" className="merge-tag">合并</Tag>}</strong><p>{item.detail}</p><small>{item.time} · {item.actor}</small></div></div>)}</section>
       </div>
     </div>
   );
